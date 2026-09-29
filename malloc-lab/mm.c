@@ -42,11 +42,20 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
+static char* heap_start;
 /*
  * mm_init - initialize the malloc package.
  */
 int mm_init(void)
 {
+    heap_start = mem_sbrk(24);
+    if (heap_start == (void*)-1)
+        return -1;
+    
+    *(size_t*)heap_start = 8|1;
+    *(size_t*)((char*)heap_start + 8) = 8|1;
+    *(size_t*)((char*)heap_start + 16) = 0|1;
+
     return 0;
 }
 
@@ -56,14 +65,16 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
+    size_t block_size = ALIGN(size + 8 + 8);
+    void *p = mem_sbrk(block_size);
     if (p == (void *)-1)
         return NULL;
     else
     {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+        *(size_t *)((char*)p - 8) = block_size|1;
+        *(size_t *)((char*)p + block_size - 16) = block_size|1;
+        *(size_t *)((char*)p - 8 + block_size) = 0|1; 
+        return (void *)((char *)p);
     }
 }
 
