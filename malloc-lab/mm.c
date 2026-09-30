@@ -66,15 +66,37 @@ int mm_init(void)
 void *mm_malloc(size_t size)
 {
     size_t block_size = ALIGN(size + 8 + 8);
-    void *p = mem_sbrk(block_size);
-    if (p == (void *)-1)
-        return NULL;
+    void* p = heap_start;
+    size_t metadata = *(size_t*)((char*)p + 16);
+    p += 16;
+
+    while ((metadata & ~1) != 0 && ((metadata & ~1) < block_size || (metadata & 1) == 1))
+    {
+        p += (metadata & ~1);
+        metadata = *(size_t*)((char*)p);
+    }
+
+    if ((metadata & ~1) == 0)
+    {
+        void* q = mem_sbrk(block_size);
+        if (q == (void*)-1)
+        {
+            return NULL;
+        }
+        else
+        {
+            *(size_t *)((char*)p) = block_size|1;
+            *(size_t *)((char*)p + block_size - 8) = block_size|1;
+            *(size_t *)((char*)p + block_size) = 0|1; 
+            return (void *)((char *)p+8);
+        }
+    }
     else
     {
-        *(size_t *)((char*)p - 8) = block_size|1;
-        *(size_t *)((char*)p + block_size - 16) = block_size|1;
-        *(size_t *)((char*)p - 8 + block_size) = 0|1; 
-        return (void *)((char *)p);
+        metadata = *(size_t*)p|1;
+        *(size_t*)((char*)p) = metadata;
+        *(size_t*)((char*)p + (metadata&~1) - 8) = metadata;
+        return (char*)(p+8);
     }
 }
 
@@ -83,6 +105,35 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
+    if (ptr == NULL)
+        return;
+
+    size_t current_size = *(size_t *)((char*)ptr - 8) & ~1;
+    size_t prev_alloc = *(size_t *)((char*)ptr - 16) & 1;
+    size_t prev_size = *(size_t *)((char*)ptr - 16) & ~1;
+    size_t next_alloc = *(size_t *)((char*)ptr -8 + current_size) & 1;
+    size_t next_size = *(size_t *)((char*)ptr -8 + current_size) & ~1;
+
+    if (prev_alloc == 1 && next_alloc == 1)
+    {
+        *(size_t *)((char*)ptr -8) = *(size_t *)((char*)ptr -8) & ~1;
+        *(size_t *)((char*)ptr -8 + current_size - 8) = *(size_t *)((char*)ptr -8 + current_size - 8) & ~1;
+    }
+    else if (prev_alloc == 1 && next_alloc == 0)
+    {
+        *(size_t *)((char*)ptr - 8) = current_size + next_size;
+        *(size_t *)((char*)ptr - 8 + current_size + next_size - 8) = current_size + next_size;
+    }
+    else if (prev_alloc == 0 && next_alloc == 1)
+    {
+        *(size_t *)((char*)ptr - 8 - prev_size) = prev_size + current_size;
+        *(size_t *)((char*)ptr - 8 + current_size - 8) = prev_size + current_size;
+    }
+    else
+    {
+        *(size_t *)((char*)ptr - 8 - prev_size) = prev_size + current_size + next_size;
+        *(size_t *)((char*)ptr - 8 + current_size + next_size - 8) = prev_size + current_size + next_size;
+    }
 }
 
 /*
@@ -90,17 +141,31 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
+    if (ptr == NULL)
+        return mm_malloc(size);
+    
+    if (size == 0)
+    {
+        mm_free(ptr);
         return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-        copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+    }
+
+    size_t current_size = *(size_t *)((char*)ptr - 8) & ~1;
+    size_t new_size = ALIGN(size + 16);
+
+    if (new_size <= current_size)
+        return ptr;
+
+    if (new_size > current_size)
+    {
+        void *dest = mm_malloc(size);
+
+        if (dest == NULL)
+            return NULL;
+        
+        memcpy(dest, ptr, current_size - 16);
+        mm_free(ptr);
+        return dest;
+    }
+    return NULL;
 }
