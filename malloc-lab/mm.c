@@ -34,8 +34,6 @@ team_t team = {
     /* Second member's email address (leave blank if none) */
     ""};
 
-
-
 //constant
 #define WSIZE 8
 #define DSIZE 16
@@ -56,120 +54,14 @@ team_t team = {
 #define HDRP(bp) (size_t*)((char*)bp - 8)
 #define FTRP(bp) (size_t*)((char*)bp + GET_SIZE(HDRP(bp)) - 8)
 
-
-typedef struct free_block {
-    char* bp;
-    struct free_block* prev;
-    struct free_block* next;
-} free_block;
-
-typedef struct head_block {
-    free_block* entry;
-} head_block;
-
-head_block head_ary[10];
-
-void init(head_block head_ary[10])
-{
-    for (int i=0; i<10; i++)
-        head_ary[i].entry = NULL;
-}
-
-int get_class_index(size_t block_size)
-{
-    if (block_size >= 8192) return 9;
-    else if (block_size >= 4096) return 8;
-    else if (block_size >= 2048) return 7;
-    else if (block_size >= 1024) return 6;
-    else if (block_size >= 512) return 5;
-    else if (block_size >= 256) return 4;
-    else if (block_size >= 128) return 3;
-    else if (block_size >= 64) return 2;
-    else if (block_size >= 32) return 1;
-    else return 0;
-}
-
-free_block *free_block_search(size_t block_size)
-{
-    int index = get_class_index(block_size);
-
-    for (int i = index; i < 10; i++)
-    {
-        free_block *current = head_ary[i].entry;
-
-        while (current != NULL)
-        {
-            size_t current_size = GET_SIZE(GET(HDRP(current->bp)));
-
-            if (current_size >= block_size)
-                return current;
-
-            current = current->next;
-        }
-    }
-    
-    return NULL;
-}
-
-void remove_free_block(free_block *node)
-{
-    int index = get_class_index(
-        GET_SIZE(GET(HDRP(node->bp)))
-    );
-
-    if (node->prev != NULL)
-        node->prev->next = node->next;
-    else
-        head_ary[index].entry = node->next;
-
-    if (node->next != NULL)
-        node->next->prev = node->prev;
-
-    free(node);
-}
-
-int insert_free_block(void *bp)
-{
-    size_t block_size = GET_SIZE(GET(HDRP(bp)));
-    int index = get_class_index(block_size);
-
-    free_block *node = malloc(sizeof(free_block));
-
-    if (node == NULL)
-        return -1;
-
-    node->bp = bp;
-    node->prev = NULL;
-    node->next = head_ary[index].entry;
-
-    if (head_ary[index].entry != NULL)
-        head_ary[index].entry->prev = node;
-
-    head_ary[index].entry = node;
-
-    return 0;
-}
-
-static char* heap_start;
-
 int mm_init(void)
 {
-    heap_start = mem_sbrk(DSIZE + WSIZE);
 
-    if (heap_start == (void*)-1)
-        return -1;
-
-    PUT(heap_start, PACK(WSIZE, 1));
-    PUT(heap_start + WSIZE, PACK(WSIZE, 1));
-    PUT(heap_start + DSIZE, PACK(0, 1));
-    
-    return 0;
 }
 
 void *mm_malloc(size_t size)
 {
-    size_t adjusted_block_size = ALIGN(size + DSIZE);
-    int index = get_class_index(adjusted_block_size);
+
 }
 
 void mm_free(void *ptr)
