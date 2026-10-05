@@ -56,24 +56,6 @@ team_t team = {
 #define HDRP(bp) (size_t*)((char*)bp - 8) // payload 주소 → header 주소
 #define FTRP(bp) (size_t*)((char*)bp + GET_SIZE(HDRP(bp)) - 8) // payload 주소 → footer 주소
 
-typedef struct free_block {
-    char* bp;
-    struct free_block* prev;
-    struct free_block* next;
-} free_block;
-
-typedef struct head_block {
-    free_block* entry;
-} head_block;
-
-head_block head_ary[10];
-
-void init(head_block head_ary[10])
-{
-    for (int i=0; i<10; i++)
-        head_ary[i].entry = NULL;
-}
-
 static char* heap_start;
 /*
  * mm_init - initialize the malloc package.
@@ -111,11 +93,9 @@ int get_class_index(size_t block_size)
     else return 0;
 }
 
-
 void *mm_malloc(size_t size)
 {
-    size_t adjusted_block_size = ALIGN(size + DSIZE);
-    int index = get_class_index(adjusted_block_size);
+
 }
 
 /*

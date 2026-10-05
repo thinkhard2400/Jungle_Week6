@@ -14,7 +14,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
-
+#include <math.h>
 #include "mm.h"
 #include "memlib.h"
 
@@ -56,10 +56,29 @@ team_t team = {
 #define HDRP(bp) (size_t*)((char*)bp - 8) // payload 주소 → header 주소
 #define FTRP(bp) (size_t*)((char*)bp + GET_SIZE(HDRP(bp)) - 8) // payload 주소 → footer 주소
 
+typedef struct free_block {
+    char* bp;
+    struct free_block* prev;
+    struct free_block* next;
+} free_block;
+
+typedef struct head_block {
+    free_block* entry;
+} head_block;
+
+head_block head_ary[10];
+
+void init(head_block head_ary[10])
+{
+    for (int i=0; i<10; i++)
+        head_ary[i].entry = NULL;
+}
+
 static char* heap_start;
 /*
  * mm_init - initialize the malloc package.
  */
+
 int mm_init(void)
 {
     heap_start = mem_sbrk(DSIZE + WSIZE);
@@ -79,6 +98,34 @@ int mm_init(void)
  *     Always allocate a block whose size is a multiple of the alignment.
  */
 
+int get_class_index(size_t block_size)
+{
+    if (block_size >= 8192) return 9;
+    else if (block_size >= 4096) return 8;
+    else if (block_size >= 2048) return 7;
+    else if (block_size >= 1024) return 6;
+    else if (block_size >= 512) return 5;
+    else if (block_size >= 256) return 4;
+    else if (block_size >= 128) return 3;
+    else if (block_size >= 64) return 2;
+    else if (block_size >= 32) return 1;
+    else return 0;
+}
+
+free_block* free_block_search(size_t block_size, int idx)
+{
+
+}
+
+void remove_free_block()
+{
+
+}
+
+void insert_free_block()
+{
+
+}
 
 void *mm_malloc(size_t size)
 {
