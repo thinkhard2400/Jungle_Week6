@@ -14,7 +14,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
-
+#include <math.h>
 #include "mm.h"
 #include "memlib.h"
 
@@ -34,13 +34,27 @@ team_t team = {
     /* Second member's email address (leave blank if none) */
     ""};
 
-/* single word (4) or double word (8) alignment */
+
+
+//constant
+#define WSIZE 8
+#define DSIZE 16
 #define ALIGNMENT 8
 
-/* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
-#define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+//metadata
+#define PACK(size, alloc_bit) ((size) | (alloc_bit)) // size와 alloc bit를 하나의 값으로 합침
+#define GET(bp) (*(size_t*)(bp)) // 주소에서 metadata를 읽음
+#define PUT(bp, value) (*(size_t*)(bp) = (value)) // 주소에 metadata를 씀
+
+//metadata translator
+#define GET_SIZE(value) ((value) & ~0x7) // metadata에서 block size만 추출
+#define GET_ALLOC(value) ((value) & 0x1) // metadata에서 allocation bit만 추출
+
+//block
+#define HDRP(bp) (size_t*)((char*)bp - 8) // payload 주소 → header 주소
+#define FTRP(bp) (size_t*)((char*)bp + GET_SIZE(HDRP(bp)) - 8) // payload 주소 → footer 주소
 
 static char* heap_start;
 /*
@@ -48,14 +62,15 @@ static char* heap_start;
  */
 int mm_init(void)
 {
-    heap_start = mem_sbrk(24);
+    heap_start = mem_sbrk(DSIZE + WSIZE);
+
     if (heap_start == (void*)-1)
         return -1;
-    
-    *(size_t*)heap_start = 8|1;
-    *(size_t*)((char*)heap_start + 8) = 8|1;
-    *(size_t*)((char*)heap_start + 16) = 0|1;
 
+    PUT(heap_start, PACK(WSIZE, 1));
+    PUT(heap_start + WSIZE, PACK(WSIZE, 1));
+    PUT(heap_start + DSIZE, PACK(0, 1));
+    
     return 0;
 }
 
@@ -63,41 +78,25 @@ int mm_init(void)
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
+
+int get_class_index(size_t block_size)
+{
+    if (block_size >= pow(2, 13)) return 9;
+    else if (block_size >= pow(2, 12)) return 8;
+    else if (block_size >= pow(2, 11)) return 7;
+    else if (block_size >= pow(2, 10)) return 6;
+    else if (block_size >= pow(2, 9)) return 5;
+    else if (block_size >= pow(2, 8)) return 4;
+    else if (block_size >= pow(2, 7)) return 3;
+    else if (block_size >= pow(2, 6)) return 2;
+    else if (block_size >= pow(2, 5)) return 1;
+    else return 0;
+}
+
 void *mm_malloc(size_t size)
 {
-    size_t block_size = ALIGN(size + 8 + 8);
-    void* p = heap_start;
-    size_t metadata = *(size_t*)((char*)p + 16);
-    p += 16;
-
-    while ((metadata & ~1) != 0 && ((metadata & ~1) < block_size || (metadata & 1) == 1))
-    {
-        p += (metadata & ~1);
-        metadata = *(size_t*)((char*)p);
-    }
-
-    if ((metadata & ~1) == 0)
-    {
-        void* q = mem_sbrk(block_size);
-        if (q == (void*)-1)
-        {
-            return NULL;
-        }
-        else
-        {
-            *(size_t *)((char*)p) = block_size|1;
-            *(size_t *)((char*)p + block_size - 8) = block_size|1;
-            *(size_t *)((char*)p + block_size) = 0|1; 
-            return (void *)((char *)p+8);
-        }
-    }
-    else
-    {
-        metadata = *(size_t*)p|1;
-        *(size_t*)((char*)p) = metadata;
-        *(size_t*)((char*)p + (metadata&~1) - 8) = metadata;
-        return (char*)(p+8);
-    }
+    size_t requested_size = ALIGN(size + DSIZE);
+    int index = get_class_index(size);
 }
 
 /*
@@ -105,35 +104,7 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
-    if (ptr == NULL)
-        return;
 
-    size_t current_size = *(size_t *)((char*)ptr - 8) & ~1;
-    size_t prev_alloc = *(size_t *)((char*)ptr - 16) & 1;
-    size_t prev_size = *(size_t *)((char*)ptr - 16) & ~1;
-    size_t next_alloc = *(size_t *)((char*)ptr -8 + current_size) & 1;
-    size_t next_size = *(size_t *)((char*)ptr -8 + current_size) & ~1;
-
-    if (prev_alloc == 1 && next_alloc == 1)
-    {
-        *(size_t *)((char*)ptr -8) = *(size_t *)((char*)ptr -8) & ~1;
-        *(size_t *)((char*)ptr -8 + current_size - 8) = *(size_t *)((char*)ptr -8 + current_size - 8) & ~1;
-    }
-    else if (prev_alloc == 1 && next_alloc == 0)
-    {
-        *(size_t *)((char*)ptr - 8) = current_size + next_size;
-        *(size_t *)((char*)ptr - 8 + current_size + next_size - 8) = current_size + next_size;
-    }
-    else if (prev_alloc == 0 && next_alloc == 1)
-    {
-        *(size_t *)((char*)ptr - 8 - prev_size) = prev_size + current_size;
-        *(size_t *)((char*)ptr - 8 + current_size - 8) = prev_size + current_size;
-    }
-    else
-    {
-        *(size_t *)((char*)ptr - 8 - prev_size) = prev_size + current_size + next_size;
-        *(size_t *)((char*)ptr - 8 + current_size + next_size - 8) = prev_size + current_size + next_size;
-    }
 }
 
 /*
@@ -141,31 +112,6 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    if (ptr == NULL)
-        return mm_malloc(size);
-    
-    if (size == 0)
-    {
-        mm_free(ptr);
-        return NULL;
-    }
 
-    size_t current_size = *(size_t *)((char*)ptr - 8) & ~1;
-    size_t new_size = ALIGN(size + 16);
-
-    if (new_size <= current_size)
-        return ptr;
-
-    if (new_size > current_size)
-    {
-        void *dest = mm_malloc(size);
-
-        if (dest == NULL)
-            return NULL;
-        
-        memcpy(dest, ptr, current_size - 16);
-        mm_free(ptr);
-        return dest;
-    }
-    return NULL;
 }
+
