@@ -14,7 +14,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
-#include <math.h>
+
 #include "mm.h"
 #include "memlib.h"
 
@@ -44,40 +44,36 @@ team_t team = {
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
 //metadata
-#define PACK(size, alloc_bit) ((size) | (alloc_bit)) // size와 alloc bit를 하나의 값으로 합침
-#define GET(bp) (*(size_t*)(bp)) // 주소에서 metadata를 읽음
-#define PUT(bp, value) (*(size_t*)(bp) = (value)) // 주소에 metadata를 씀
+#define PACK(size, alloc_bit) ((size) | (alloc_bit))
+#define GET(bp) (*(size_t*)(bp))
+#define PUT(bp, value) (*(size_t*)(bp) = (value))
 
 //metadata translator
-#define GET_SIZE(value) ((value) & ~0x7) // metadata에서 block size만 추출
-#define GET_ALLOC(value) ((value) & 0x1) // metadata에서 allocation bit만 추출
+#define GET_SIZE(value) ((value) & ~0x7)
+#define GET_ALLOC(value) ((value) & 0x1)
 
 //block
-#define HDRP(bp) (size_t*)((char*)bp - 8) // payload 주소 → header 주소
-#define FTRP(bp) (size_t*)((char*)bp + GET_SIZE(HDRP(bp)) - 8) // payload 주소 → footer 주소
+#define HDRP(bp) (size_t*)((char*)bp - 8)
+#define FTRP(bp) (size_t*)((char*)bp + GET_SIZE(HDRP(bp)) - 8)
 
-static char* heap_start;
-/*
- * mm_init - initialize the malloc package.
- */
-int mm_init(void)
+
+typedef struct free_block {
+    char* bp;
+    struct free_block* prev;
+    struct free_block* next;
+} free_block;
+
+typedef struct head_block {
+    free_block* entry;
+} head_block;
+
+head_block head_ary[10];
+
+void init(head_block head_ary[10])
 {
-    heap_start = mem_sbrk(DSIZE + WSIZE);
-
-    if (heap_start == (void*)-1)
-        return -1;
-
-    PUT(heap_start, PACK(WSIZE, 1));
-    PUT(heap_start + WSIZE, PACK(WSIZE, 1));
-    PUT(heap_start + DSIZE, PACK(0, 1));
-    
-    return 0;
+    for (int i=0; i<10; i++)
+        head_ary[i].entry = NULL;
 }
-
-/*
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- */
 
 int get_class_index(size_t block_size)
 {
@@ -93,24 +89,95 @@ int get_class_index(size_t block_size)
     else return 0;
 }
 
-void *mm_malloc(size_t size)
+free_block *free_block_search(size_t block_size)
 {
+    int index = get_class_index(block_size);
 
+    for (int i = index; i < 10; i++)
+    {
+        free_block *current = head_ary[i].entry;
+
+        while (current != NULL)
+        {
+            size_t current_size = GET_SIZE(GET(HDRP(current->bp)));
+
+            if (current_size >= block_size)
+                return current;
+
+            current = current->next;
+        }
+    }
+    
+    return NULL;
 }
 
-/*
- * mm_free - Freeing a block does nothing.
- */
+void remove_free_block(free_block *node)
+{
+    int index = get_class_index(
+        GET_SIZE(GET(HDRP(node->bp)))
+    );
+
+    if (node->prev != NULL)
+        node->prev->next = node->next;
+    else
+        head_ary[index].entry = node->next;
+
+    if (node->next != NULL)
+        node->next->prev = node->prev;
+
+    free(node);
+}
+
+int insert_free_block(void *bp)
+{
+    size_t block_size = GET_SIZE(GET(HDRP(bp)));
+    int index = get_class_index(block_size);
+
+    free_block *node = malloc(sizeof(free_block));
+
+    if (node == NULL)
+        return -1;
+
+    node->bp = bp;
+    node->prev = NULL;
+    node->next = head_ary[index].entry;
+
+    if (head_ary[index].entry != NULL)
+        head_ary[index].entry->prev = node;
+
+    head_ary[index].entry = node;
+
+    return 0;
+}
+
+static char* heap_start;
+
+int mm_init(void)
+{
+    heap_start = mem_sbrk(DSIZE + WSIZE);
+
+    if (heap_start == (void*)-1)
+        return -1;
+
+    PUT(heap_start, PACK(WSIZE, 1));
+    PUT(heap_start + WSIZE, PACK(WSIZE, 1));
+    PUT(heap_start + DSIZE, PACK(0, 1));
+    
+    return 0;
+}
+
+void *mm_malloc(size_t size)
+{
+    size_t adjusted_block_size = ALIGN(size + DSIZE);
+    int index = get_class_index(adjusted_block_size);
+}
+
 void mm_free(void *ptr)
 {
 
 }
 
-/*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- */
 void *mm_realloc(void *ptr, size_t size)
 {
 
 }
-
