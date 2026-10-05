@@ -71,7 +71,7 @@ head_block head_ary[10];
 void init(head_block head_ary[10])
 {
     for (int i=0; i<10; i++)
-        head_ary->entry = NULL;
+        head_ary[i].entry = NULL;
 }
 
 static char* heap_start;
