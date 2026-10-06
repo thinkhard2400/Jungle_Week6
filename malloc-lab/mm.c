@@ -1,4 +1,4 @@
-/*
+    /*
  * mm-naive.c - The fastest, least memory-efficient malloc package.
  *
  * In this naive approach, a block is allocated by simply incrementing
@@ -34,6 +34,8 @@ team_t team = {
     /* Second member's email address (leave blank if none) */
     ""};
 
+
+
 //constant
 #define WSIZE 8
 #define DSIZE 16
@@ -42,21 +44,57 @@ team_t team = {
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
 //metadata
-#define PACK(size, alloc_bit) ((size) | (alloc_bit))
-#define GET(bp) (*(size_t*)(bp))
-#define PUT(bp, value) (*(size_t*)(bp) = (value))
+#define PACK(size, alloc_bit) ((size) | (alloc_bit)) //block 크기와 allocation bit를 하나의 값으로 합친다.
+#define GET(bp) (*(size_t*)(bp)) //bp가 가리키는 주소에서 metadata 값을 읽는다.
+#define PUT(bp, value) (*(size_t*)(bp) = (value)) //bp가 가리키는 주소에 metadata 값을 쓴다.
 
 //metadata translator
-#define GET_SIZE(value) ((value) & ~0x7)
-#define GET_ALLOC(value) ((value) & 0x1)
+#define GET_SIZE(value) ((value) & ~0x7) //metadata에서 하위 3비트를 제거하여 block size만 추출한다.
+#define GET_ALLOC(value) ((value) & 0x1) //metadata의 최하위 1비트에서 allocation 여부를 추출한다.
 
 //block
-#define HDRP(bp) (size_t*)((char*)bp - 8)
-#define FTRP(bp) (size_t*)((char*)bp + GET_SIZE(HDRP(bp)) - 8)
+#define HDRP(bp) (size_t*)((char*)bp - 8) //payload 주소 bp에서 8B 앞의 header 주소를 구한다.
+#define FTRP(bp) (size_t*)((char*)bp + GET_SIZE(HDRP(bp)) - 8) //bp와 block size를 이용해 해당 block의 footer 주소를 구한다.
+
+typedef struct free_block {
+    char* bp;
+    struct free_block* prev;
+    struct free_block* next;
+} free_block;
+
+typedef struct head_block {
+    free_block* entry;
+} head_block;
+
+char* free_block_search(size_t block_size)
+{
+    
+}
+
+void remove_free_block(char* bp)
+{
+
+}
+
+void insert_free_block(char* bp)
+{
+
+}
+
+static char* heap_start;
 
 int mm_init(void)
 {
+    heap_start = mem_sbrk(DSIZE + WSIZE);
 
+    if (heap_start == (void*)-1)
+        return -1;
+
+    PUT(heap_start, PACK(WSIZE, 1));
+    PUT(heap_start + WSIZE, PACK(WSIZE, 1));
+    PUT(heap_start + DSIZE, PACK(0, 1));
+    
+    return 0;
 }
 
 void *mm_malloc(size_t size)
