@@ -1,21 +1,16 @@
 /*
- * mm.c
+ * Case 1: External Free List
+ * Placement: Best Fit
+ * Splitting
+ * Minimum Block Size: 32B
+ * Immediate Coalescing
+ * Heap Extension
+ * In-place realloc
  *
- * External Free List + Best Fit + Splitting
- * + Immediate Coalescing + In-place realloc
- *
- * Heap layout of each real block:
- *
- *   [ external node (24B) ][ header (8B) ][ payload ... ][ footer (8B) ]
- *
- * The 24-byte node is physically reserved for every block.
- * It is linked into the external free list only while the block is free.
- *
- * Block size stored in header/footer includes:
- *
- *   header + payload + footer
- *
- * and does NOT include the 24-byte external node.
+ * IMPORTANT:
+ * - Simulated heap blocks live in memlib's heap.
+ * - Free-list nodes are real libc malloc'd objects, outside the
+ *   simulated heap used by mdriver for utilization measurement.
  */
 
 #include <stdio.h>
@@ -28,11 +23,6 @@
 #include "mm.h"
 #include "memlib.h"
 
-
-/*********************************************************
- * Team information
- *********************************************************/
-
 team_t team = {
     "ateam",
     "Harry Bovik",
@@ -41,200 +31,44 @@ team_t team = {
     ""
 };
 
-
-/*********************************************************
- * Constants
- *********************************************************/
-
-#define WSIZE 8
-#define DSIZE 16
-#define ALIGNMENT 8
-
-/*
- * Minimum block size:
- *
- * Header  :  8B
- * Payload : 16B
- * Footer  :  8B
- *
- * Total = 32B
- */
+#define WSIZE       8
+#define DSIZE       16
+#define ALIGNMENT   8
 #define MIN_BLOCK_SIZE 32
 
-/*
- * External free-list node:
- *
- * bp   :  8B
- * prev :  8B
- * next :  8B
- *
- * Total = 24B
- */
-#define NODE_SIZE 24
+#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~((size_t)(ALIGNMENT - 1)))
+#define PACK(size, alloc) ((size) | (size_t)(alloc))
+#define GET(p) (*(size_t *)(p))
+#define PUT(p, val) (*(size_t *)(p) = (val))
+#define GET_SIZE(val) ((val) & ~((size_t)0x7))
+#define GET_ALLOC(val) ((val) & (size_t)0x1)
 
-
-/*********************************************************
- * Metadata helpers
- *********************************************************/
-
-#define ALIGN(size) \
-    (((size) + (ALIGNMENT - 1)) & ~((size_t)(ALIGNMENT - 1)))
-
-#define PACK(size, alloc_bit) \
-    ((size) | (size_t)(alloc_bit))
-
-#define GET(p) \
-    (*(size_t *)(p))
-
-#define PUT(p, value) \
-    (*(size_t *)(p) = (value))
-
-#define GET_SIZE(value) \
-    ((value) & ~((size_t)0x7))
-
-#define GET_ALLOC(value) \
-    ((value) & (size_t)0x1)
-
-
-/*********************************************************
- * Block helpers
- *
- * bp = first byte of payload
- *********************************************************/
-
-#define HDRP(bp) \
-    ((char *)(bp) - WSIZE)
-
-#define FTRP(bp) \
-    ((char *)(bp) + GET_SIZE(GET(HDRP(bp))) - DSIZE)
-
-/*
- * The node belonging to bp is immediately before its header.
- *
- * [ node 24B ][ header 8B ][ payload ... ][ footer 8B ]
- */
-#define NODEP(bp) \
-    ((free_block *)((char *)(bp) - WSIZE - NODE_SIZE))
-
-
-/*********************************************************
- * External free-list node
- *********************************************************/
+#define HDRP(bp) ((char *)(bp) - WSIZE)
+#define FTRP(bp) ((char *)(bp) + GET_SIZE(GET(HDRP(bp))) - DSIZE)
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(GET(HDRP(bp))))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(GET((char *)(bp) - DSIZE)))
 
 typedef struct free_block {
     char *bp;
-
     struct free_block *prev;
     struct free_block *next;
-
 } free_block;
 
+static free_block *free_list_head = NULL;
 
-/*********************************************************
- * Free-list head
- *********************************************************/
-
-typedef struct head_block {
-    free_block *entry;
-} head_block;
-
-
-/*********************************************************
- * Global state
- *********************************************************/
-
-/*
- * Payload pointer of the prologue block.
- */
-static char *heap_start;
-
-/*
- * Payload pointer of the last real heap block.
- */
-static char *last_block;
-
-/*
- * Free-list head.
- */
-static head_block free_list;
-
-
-/*********************************************************
- * Adjust requested payload size
- *
- * requested payload
- *        ↓
- * payload + header + footer
- *        ↓
- * alignment
- *        ↓
- * minimum 32B
- *********************************************************/
-
-static size_t adjusted_size(size_t size)
+static size_t adjust_block_size(size_t size)
 {
     size_t asize;
 
-    /*
-     * Prevent overflow in size + DSIZE.
-     */
     if (size > (size_t)-1 - DSIZE)
         return 0;
 
     asize = ALIGN(size + DSIZE);
-
     if (asize < MIN_BLOCK_SIZE)
         asize = MIN_BLOCK_SIZE;
 
     return asize;
 }
-
-
-/*********************************************************
- * Free-list insertion
- *
- * Insert at head.
- *********************************************************/
-
-static void list_insert(free_block *node)
-{
-    node->prev = NULL;
-    node->next = free_list.entry;
-
-    if (free_list.entry != NULL)
-        free_list.entry->prev = node;
-
-    free_list.entry = node;
-}
-
-
-/*********************************************************
- * Free-list removal
- *********************************************************/
-
-static void list_remove(free_block *node)
-{
-    if (node == NULL)
-        return;
-
-    if (node->prev != NULL) {
-        node->prev->next = node->next;
-    }
-    else if (free_list.entry == node) {
-        free_list.entry = node->next;
-    }
-
-    if (node->next != NULL)
-        node->next->prev = node->prev;
-
-    node->prev = NULL;
-    node->next = NULL;
-}
-
-
-/*********************************************************
- * Write block metadata
- *********************************************************/
 
 static void write_block(char *bp, size_t size, int alloc)
 {
@@ -242,991 +76,335 @@ static void write_block(char *bp, size_t size, int alloc)
     PUT(FTRP(bp), PACK(size, alloc));
 }
 
-
-/*********************************************************
- * Previous physical block
- *
- * Layout:
- *
- * [ prev node ][ prev header ][ prev payload ][ prev footer ]
- *                                                   |
- *                                                   ↓
- *                                              current node
- *                                              current header
- *
- * The footer immediately before current node identifies
- * the previous block.
- *********************************************************/
-
-static char *prev_bp(char *bp)
+/* Find the external node corresponding to a simulated-heap block. */
+static free_block *find_node(char *bp)
 {
-    char *prev_footer;
-    size_t prev_size;
+    free_block *cur = free_list_head;
 
-    prev_footer =
-        (char *)HDRP(bp) - NODE_SIZE - WSIZE;
+    while (cur != NULL) {
+        if (cur->bp == bp)
+            return cur;
+        cur = cur->next;
+    }
 
-    prev_size =
-        GET_SIZE(GET(prev_footer));
-
-    return prev_footer - prev_size + DSIZE;
+    return NULL;
 }
 
-
-/*********************************************************
- * Next physical block
- *********************************************************/
-
-static char *next_bp(char *bp)
+static int insert_node(char *bp)
 {
-    /*
-     * [ current footer ]
-     * [ next node      ]
-     * [ next header    ]
-     * [ next payload   ]
-     */
-    return
-        (char *)FTRP(bp)
-        + WSIZE
-        + NODE_SIZE
-        + WSIZE;
+    free_block *node = (free_block *)malloc(sizeof(free_block));
+
+    if (node == NULL)
+        return -1;
+
+    node->bp = bp;
+    node->prev = NULL;
+    node->next = free_list_head;
+
+    if (free_list_head != NULL)
+        free_list_head->prev = node;
+
+    free_list_head = node;
+    return 0;
 }
 
-
-/*********************************************************
- * Previous allocation status
- *********************************************************/
-
-static int prev_alloc(char *bp)
+static void remove_node(free_block *node)
 {
-    char *prev_footer;
+    if (node == NULL)
+        return;
 
-    prev_footer =
-        (char *)HDRP(bp) - NODE_SIZE - WSIZE;
+    if (node->prev != NULL)
+        node->prev->next = node->next;
+    else
+        free_list_head = node->next;
 
-    return (int)GET_ALLOC(GET(prev_footer));
+    if (node->next != NULL)
+        node->next->prev = node->prev;
+
+    free(node);
 }
 
-
-/*********************************************************
- * Next allocation status
- *********************************************************/
-
-static int next_alloc(char *bp)
+static void clear_free_list(void)
 {
-    /*
-     * last_block has the epilogue immediately after it,
-     * so it has no next real block.
-     */
-    if (bp == last_block)
-        return 1;
+    free_block *cur = free_list_head;
 
-    return (int)GET_ALLOC(GET(HDRP(next_bp(bp))));
+    while (cur != NULL) {
+        free_block *next = cur->next;
+        free(cur);
+        cur = next;
+    }
+
+    free_list_head = NULL;
 }
 
-
-/*********************************************************
- * Best Fit search
- *
- * Search the entire free list.
- *
- * Choose the smallest free block whose size is >= asize.
- *********************************************************/
-
-static free_block *best_fit(size_t asize)
+static free_block *find_best_fit(size_t asize)
 {
-    free_block *current;
-    free_block *best;
+    free_block *cur = free_list_head;
+    free_block *best = NULL;
+    size_t best_size = (size_t)-1;
 
-    size_t best_size;
+    while (cur != NULL) {
+        size_t size = GET_SIZE(GET(HDRP(cur->bp)));
 
-    current = free_list.entry;
-    best = NULL;
-    best_size = (size_t)-1;
+        if (size >= asize && size < best_size) {
+            best = cur;
+            best_size = size;
 
-    while (current != NULL) {
-
-        char *bp;
-        size_t current_size;
-
-        bp = current->bp;
-
-        current_size =
-            GET_SIZE(GET(HDRP(bp)));
-
-        if (current_size >= asize &&
-            current_size < best_size) {
-
-            best = current;
-            best_size = current_size;
-
-            /*
-             * Exact fit.
-             */
-            if (current_size == asize)
+            if (size == asize)
                 break;
         }
 
-        current = current->next;
+        cur = cur->next;
     }
 
     return best;
 }
 
-
-/*********************************************************
- * Immediate coalescing
- *
- * Four logical cases:
- *
- * 1. prev alloc / next alloc
- * 2. prev alloc / next free
- * 3. prev free  / next alloc
- * 4. prev free  / next free
- *********************************************************/
-
 static char *coalesce(char *bp)
 {
-    char *original_bp;
-    char *prev;
-    char *next;
+    size_t size = GET_SIZE(GET(HDRP(bp)));
+    int prev_free = !GET_ALLOC(GET(HDRP(PREV_BLKP(bp))));
+    int next_free = !GET_ALLOC(GET(HDRP(NEXT_BLKP(bp))));
 
-    size_t size;
+    if (prev_free && next_free) {
+        char *prev = PREV_BLKP(bp);
+        char *next = NEXT_BLKP(bp);
+        free_block *prev_node = find_node(prev);
+        free_block *next_node = find_node(next);
 
-    int prev_is_alloc;
-    int next_is_alloc;
+        size += GET_SIZE(GET(HDRP(prev))) + GET_SIZE(GET(HDRP(next)));
 
-    original_bp = bp;
-
-    prev = NULL;
-    next = NULL;
-
-    size =
-        GET_SIZE(GET(HDRP(bp)));
-
-    prev_is_alloc =
-        prev_alloc(bp);
-
-    next_is_alloc =
-        next_alloc(bp);
-
-    /*
-     * Important:
-     *
-     * Calculate adjacent block addresses BEFORE changing bp
-     * or its header.
-     */
-    if (!prev_is_alloc)
-        prev = prev_bp(original_bp);
-
-    if (!next_is_alloc)
-        next = next_bp(original_bp);
-
-
-    /*
-     * Merge with previous free block.
-     */
-    if (!prev_is_alloc) {
-
-        size_t prev_size;
-        int current_was_last;
-
-        prev_size =
-            GET_SIZE(GET(HDRP(prev)));
-
-        current_was_last =
-            (original_bp == last_block);
-
-        /*
-         * Previous block is already in the free list.
-         */
-        list_remove(NODEP(prev));
+        remove_node(prev_node);
+        remove_node(next_node);
 
         bp = prev;
+        write_block(bp, size, 0);
+    }
+    else if (prev_free) {
+        char *prev = PREV_BLKP(bp);
+        free_block *prev_node = find_node(prev);
 
-        /*
-         * Previous block + node + current block
-         */
-        size +=
-            NODE_SIZE + prev_size;
+        size += GET_SIZE(GET(HDRP(prev)));
+        remove_node(prev_node);
 
-        if (current_was_last)
-            last_block = bp;
+        bp = prev;
+        write_block(bp, size, 0);
+    }
+    else if (next_free) {
+        char *next = NEXT_BLKP(bp);
+        free_block *next_node = find_node(next);
+
+        size += GET_SIZE(GET(HDRP(next)));
+        remove_node(next_node);
+
+        write_block(bp, size, 0);
     }
 
-
-    /*
-     * Merge with next free block.
-     */
-    if (!next_is_alloc) {
-
-        size_t next_size;
-
-        next_size =
-            GET_SIZE(GET(HDRP(next)));
-
-        /*
-         * Next block is already in the free list.
-         */
-        list_remove(NODEP(next));
-
-        /*
-         * Current/merged block + node + next block
-         */
-        size +=
-            NODE_SIZE + next_size;
-
-        if (next == last_block)
-            last_block = bp;
-    }
-
-
-    /*
-     * Write the final merged block metadata.
-     */
-    write_block(
-        bp,
-        size,
-        0
-    );
-
-
-    /*
-     * Exactly one node represents the final free block.
-     */
-    list_insert(NODEP(bp));
+    /* Exactly one external node for the resulting free block. */
+    if (insert_node(bp) < 0)
+        return NULL;
 
     return bp;
 }
-
-
-/*********************************************************
- * Heap extension
- *
- * Old epilogue is replaced by:
- *
- * [ node ][ header ][ payload ][ footer ][ epilogue ]
- *********************************************************/
 
 static char *extend_heap(size_t asize)
 {
-    size_t total;
-
-    char *node_mem;
     char *bp;
 
-    free_block *node;
-
-    total =
-        NODE_SIZE + asize;
-
-    /*
-     * mem_sbrk takes int.
-     */
-    if (total > (size_t)INT_MAX)
+    if (asize > INT_MAX)
         return NULL;
 
-    node_mem =
-        (char *)mem_sbrk((int)total);
-
-    if (node_mem == (void *)-1)
+    bp = (char *)mem_sbrk((int)asize);
+    if (bp == (char *)-1)
         return NULL;
 
-
-    /*
-     * The new node belongs to this new block.
-     */
-    node =
-        (free_block *)node_mem;
-
-    bp =
-        node_mem
-        + NODE_SIZE
-        + WSIZE;
-
-
-    node->bp = bp;
-    node->prev = NULL;
-    node->next = NULL;
-
-
-    /*
-     * New block is allocated directly.
-     */
-    write_block(
-        bp,
-        asize,
-        1
-    );
-
-
-    /*
-     * New epilogue.
-     */
-    PUT(
-        (char *)FTRP(bp) + WSIZE,
-        PACK(0, 1)
-    );
-
-
-    last_block = bp;
+    /* bp points at the old epilogue; its header is HDRP(bp). */
+    write_block(bp, asize, 0);
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
 
     return bp;
 }
 
-
-/*********************************************************
- * mm_init
- *********************************************************/
-
 int mm_init(void)
 {
-    char *base;
+    char *heap_listp;
 
-    free_block *prologue_node;
+    /* Free external nodes left by a previous mdriver trial. */
+    clear_free_list();
 
-    char *prologue_bp;
-
-
-    /*
-     * Prologue also has a permanent node so that
-     * prev_bp()/prev_alloc() work uniformly for the
-     * first real block.
-     *
-     * [ node 24 ]
-     * [ header 8 ]
-     * [ footer 8 ]
-     * [ epilogue 8 ]
-     */
-    base =
-        (char *)mem_sbrk(
-            NODE_SIZE + DSIZE + WSIZE
-        );
-
-    if (base == (void *)-1)
+    heap_listp = (char *)mem_sbrk(4 * WSIZE);
+    if (heap_listp == (char *)-1)
         return -1;
 
-
-    prologue_node =
-        (free_block *)base;
-
-    prologue_bp =
-        base
-        + NODE_SIZE
-        + WSIZE;
-
-
-    /*
-     * Prologue node is not part of free list.
-     */
-    prologue_node->bp =
-        prologue_bp;
-
-    prologue_node->prev = NULL;
-    prologue_node->next = NULL;
-
-
-    /*
-     * Prologue block.
-     */
-    PUT(
-        HDRP(prologue_bp),
-        PACK(DSIZE, 1)
-    );
-
-    PUT(
-        FTRP(prologue_bp),
-        PACK(DSIZE, 1)
-    );
-
-
-    /*
-     * Epilogue.
-     */
-    PUT(
-        (char *)FTRP(prologue_bp) + WSIZE,
-        PACK(0, 1)
-    );
-
-
-    heap_start =
-        prologue_bp;
-
-    last_block =
-        NULL;
-
-    free_list.entry =
-        NULL;
+    PUT(heap_listp, 0);
+    PUT(heap_listp + WSIZE, PACK(DSIZE, 1));
+    PUT(heap_listp + 2 * WSIZE, PACK(DSIZE, 1));
+    PUT(heap_listp + 3 * WSIZE, PACK(0, 1));
 
     return 0;
 }
 
-
-/*********************************************************
- * mm_malloc
- *********************************************************/
-
 void *mm_malloc(size_t size)
 {
     size_t asize;
-
     free_block *node;
+    char *bp;
 
-
-    /*
-     * malloc(0)
-     */
     if (size == 0)
         return NULL;
 
-
-    /*
-     * Requested payload -> actual block size.
-     */
-    asize =
-        adjusted_size(size);
-
+    asize = adjust_block_size(size);
     if (asize == 0)
         return NULL;
 
-
-    /*
-     * Step 1:
-     * Best Fit search.
-     */
-    node =
-        best_fit(asize);
-
-
-    /*
-     * Step 2:
-     * Existing free block found.
-     */
+    node = find_best_fit(asize);
     if (node != NULL) {
+        size_t csize = GET_SIZE(GET(HDRP(node->bp)));
+        bp = node->bp;
 
-        char *bp;
-        size_t block_size;
+        remove_node(node);
 
+        if (csize - asize >= MIN_BLOCK_SIZE) {
+            char *remainder = bp + asize;
 
-        bp =
-            node->bp;
+            write_block(bp, asize, 1);
+            write_block(remainder, csize - asize, 0);
 
-        block_size =
-            GET_SIZE(GET(HDRP(bp)));
-
-
-        /*
-         * Remove from free list first.
-         */
-        list_remove(node);
-
-
-        /*
-         * Splitting condition:
-         *
-         * remainder must contain:
-         *
-         *   24B external node
-         *   + 32B minimum block
-         */
-        if (block_size
-            >= asize
-            + NODE_SIZE
-            + MIN_BLOCK_SIZE) {
-
-            char *new_bp;
-            free_block *new_node;
-
-
-            /*
-             * First part becomes allocated.
-             *
-             * Its existing node remains its node.
-             */
-            write_block(
-                bp,
-                asize,
-                1
-            );
-
-
-            /*
-             * Remainder begins after:
-             *
-             * allocated block
-             * + 24B node
-             */
-            new_bp =
-                bp
-                + asize
-                + NODE_SIZE;
-
-
-            /*
-             * new_bp's node starts immediately before
-             * its header.
-             */
-            new_node =
-                NODEP(new_bp);
-
-
-            new_node->bp =
-                new_bp;
-
-            new_node->prev =
-                NULL;
-
-            new_node->next =
-                NULL;
-
-
-            /*
-             * Remaining free block.
-             */
-            write_block(
-                new_bp,
-                block_size
-                    - asize
-                    - NODE_SIZE,
-                0
-            );
-
-
-            /*
-             * If the original block was the last block,
-             * remainder becomes the new last block.
-             */
-            if (bp == last_block)
-                last_block =
-                    new_bp;
-
-
-            /*
-             * Add remainder to free list.
-             */
-            list_insert(
-                new_node
-            );
+            if (insert_node(remainder) < 0) {
+                /* Roll back to a single allocated block. */
+                write_block(bp, csize, 1);
+            }
         }
         else {
-
-            /*
-             * No valid remainder.
-             * Consume the whole free block.
-             */
-            write_block(
-                bp,
-                block_size,
-                1
-            );
+            write_block(bp, csize, 1);
         }
-
 
         return bp;
     }
 
+    /* No fit: extend the simulated heap and allocate immediately. */
+    bp = extend_heap(asize);
+    if (bp == NULL)
+        return NULL;
 
-    /*
-     * Step 3:
-     * No suitable free block.
-     *
-     * Extend heap and allocate.
-     */
-    return extend_heap(asize);
+    write_block(bp, asize, 1);
+    return bp;
 }
-
-
-/*********************************************************
- * mm_free
- *********************************************************/
 
 void mm_free(void *ptr)
 {
     size_t size;
 
-    free_block *node;
-
-
-    /*
-     * free(NULL)
-     */
     if (ptr == NULL)
         return;
 
+    size = GET_SIZE(GET(HDRP(ptr)));
+    write_block((char *)ptr, size, 0);
 
-    /*
-     * Read current block size.
-     */
-    size =
-        GET_SIZE(GET(HDRP(ptr)));
-
-
-    /*
-     * allocated -> free
-     */
-    write_block(
-        ptr,
-        size,
-        0
-    );
-
-
-    /*
-     * This block's external node.
-     */
-    node =
-        NODEP(ptr);
-
-
-    node->bp =
-        ptr;
-
-    node->prev =
-        NULL;
-
-    node->next =
-        NULL;
-
-
-    /*
-     * Immediate coalescing.
-     *
-     * coalesce() inserts the final block into
-     * the free list.
-     */
-    coalesce(ptr);
+    if (coalesce((char *)ptr) == NULL) {
+        /* libc malloc failure for a bookkeeping node is unrecoverable
+           without changing the allocator's free-list representation. */
+        abort();
+    }
 }
-
-
-/*********************************************************
- * mm_realloc
- *********************************************************/
 
 void *mm_realloc(void *ptr, size_t size)
 {
     size_t asize;
     size_t old_size;
 
-
-    /*
-     * realloc(NULL, size)
-     * == malloc(size)
-     */
     if (ptr == NULL)
         return mm_malloc(size);
 
-
-    /*
-     * realloc(ptr, 0)
-     * == free(ptr)
-     */
     if (size == 0) {
-
         mm_free(ptr);
-
         return NULL;
     }
 
-
-    /*
-     * New block size.
-     */
-    asize =
-        adjusted_size(size);
-
+    asize = adjust_block_size(size);
     if (asize == 0)
         return NULL;
 
+    old_size = GET_SIZE(GET(HDRP(ptr)));
 
-    /*
-     * Old block size.
-     */
-    old_size =
-        GET_SIZE(GET(HDRP(ptr)));
-
-
-    /*****************************************************
-     * Case 1:
-     *
-     * shrink / same-size
-     *
-     * Keep pointer unchanged.
-     *****************************************************/
-
+    /* Shrink in place. */
     if (asize <= old_size) {
+        if (old_size - asize >= MIN_BLOCK_SIZE) {
+            char *remainder = (char *)ptr + asize;
 
-        /*
-         * Split only if the remainder can form
-         * a node + minimum block.
-         */
-        if (old_size
-            >= asize
-            + NODE_SIZE
-            + MIN_BLOCK_SIZE) {
+            write_block((char *)ptr, asize, 1);
+            write_block(remainder, old_size - asize, 0);
 
-            char *new_bp;
-            free_block *node;
-
-
-            /*
-             * Shrink current allocated block.
-             */
-            write_block(
-                ptr,
-                asize,
-                1
-            );
-
-
-            /*
-             * Create node for remainder.
-             */
-            new_bp =
-                (char *)ptr
-                + asize
-                + NODE_SIZE;
-
-
-            node =
-                NODEP(new_bp);
-
-
-            node->bp =
-                new_bp;
-
-            node->prev =
-                NULL;
-
-            node->next =
-                NULL;
-
-
-            /*
-             * Remainder becomes free block.
-             */
-            write_block(
-                new_bp,
-                old_size
-                    - asize
-                    - NODE_SIZE,
-                0
-            );
-
-
-            /*
-             * If original block was last,
-             * remainder becomes last.
-             */
-            if (ptr == last_block)
-                last_block =
-                    new_bp;
-
-
-            /*
-             * Immediate coalescing with a possible
-             * free next block.
-             */
-            coalesce(new_bp);
+            if (coalesce(remainder) == NULL)
+                abort();
         }
-
 
         return ptr;
     }
 
+    /* Grow in place using the next free block. */
+    {
+        char *next = NEXT_BLKP((char *)ptr);
+        size_t next_alloc = GET_ALLOC(GET(HDRP(next)));
 
-    /*****************************************************
-     * Case 2:
-     *
-     * Grow in place using the next free block.
-     *****************************************************/
+        if (!next_alloc) {
+            size_t next_size = GET_SIZE(GET(HDRP(next)));
+            size_t combined = old_size + next_size;
+            free_block *next_node = find_node(next);
 
-    if (!next_alloc(ptr)) {
+            if (combined >= asize) {
+                remove_node(next_node);
 
-        char *next;
+                if (combined - asize >= MIN_BLOCK_SIZE) {
+                    char *remainder = (char *)ptr + asize;
 
-        size_t next_size;
-        size_t combined_size;
+                    write_block((char *)ptr, asize, 1);
+                    write_block(remainder, combined - asize, 0);
 
-        int next_was_last;
+                    if (insert_node(remainder) < 0)
+                        abort();
+                }
+                else {
+                    write_block((char *)ptr, combined, 1);
+                }
 
-
-        /*
-         * Save next block information before modifying it.
-         */
-        next =
-            next_bp(ptr);
-
-        next_size =
-            GET_SIZE(GET(HDRP(next)));
-
-        combined_size =
-            old_size
-            + NODE_SIZE
-            + next_size;
-
-        next_was_last =
-            (next == last_block);
-
-
-        /*
-         * Enough space for in-place growth.
-         */
-        if (combined_size >= asize) {
-
-            /*
-             * Next block is consumed.
-             */
-            list_remove(
-                NODEP(next)
-            );
-
-
-            /*
-             * Start with combined allocated block.
-             */
-            write_block(
-                ptr,
-                combined_size,
-                1
-            );
-
-
-            /*
-             * Split the combined space if possible.
-             */
-            if (combined_size
-                >= asize
-                + NODE_SIZE
-                + MIN_BLOCK_SIZE) {
-
-                char *new_bp;
-                free_block *node;
-
-
-                /*
-                 * Resize current allocated block.
-                 */
-                write_block(
-                    ptr,
-                    asize,
-                    1
-                );
-
-
-                /*
-                 * Remaining free block.
-                 */
-                new_bp =
-                    (char *)ptr
-                    + asize
-                    + NODE_SIZE;
-
-
-                node =
-                    NODEP(new_bp);
-
-
-                node->bp =
-                    new_bp;
-
-                node->prev =
-                    NULL;
-
-                node->next =
-                    NULL;
-
-
-                write_block(
-                    new_bp,
-                    combined_size
-                        - asize
-                        - NODE_SIZE,
-                    0
-                );
-
-
-                /*
-                 * If consumed next was the last block,
-                 * the remainder is now last.
-                 */
-                if (next_was_last)
-                    last_block =
-                        new_bp;
-
-
-                list_insert(
-                    node
-                );
+                return ptr;
             }
-            else {
-
-                /*
-                 * Entire combined region is allocated.
-                 */
-                if (next_was_last)
-                    last_block =
-                        ptr;
-            }
-
-
-            return ptr;
         }
     }
 
-
-    /*****************************************************
-     * Case 3:
-     *
-     * In-place growth impossible.
-     *
-     * Allocate elsewhere, copy, free old block.
-     *****************************************************/
-
+    /* Grow at the end of the heap in place. */
     {
-        void *new_ptr;
+        char *next = NEXT_BLKP((char *)ptr);
+        size_t next_size = GET_SIZE(GET(HDRP(next)));
 
-        size_t old_payload;
+        if (next_size == 0 && GET_ALLOC(GET(HDRP(next)))) {
+            size_t extra = asize - old_size;
+
+            if (extra <= INT_MAX) {
+                if (mem_sbrk((int)extra) != (void *)-1) {
+                    write_block((char *)ptr, asize, 1);
+                    PUT(HDRP(NEXT_BLKP((char *)ptr)), PACK(0, 1));
+                    return ptr;
+                }
+            }
+        }
+    }
+
+    /* Fallback: allocate, copy, free. */
+    {
+        void *new_ptr = mm_malloc(size);
         size_t copy_size;
-
-
-        new_ptr =
-            mm_malloc(size);
 
         if (new_ptr == NULL)
             return NULL;
 
+        copy_size = old_size - DSIZE;
+        if (copy_size > size)
+            copy_size = size;
 
-        /*
-         * Existing payload size.
-         */
-        old_payload =
-            old_size - DSIZE;
-
-
-        /*
-         * realloc copies min(old payload, new size).
-         */
-        copy_size =
-            old_payload < size
-                ? old_payload
-                : size;
-
-
-        /*
-         * memmove handles overlap safely.
-         */
-        memmove(
-            new_ptr,
-            ptr,
-            copy_size
-        );
-
-
-        /*
-         * Free old block.
-         */
+        memcpy(new_ptr, ptr, copy_size);
         mm_free(ptr);
-
 
         return new_ptr;
     }
